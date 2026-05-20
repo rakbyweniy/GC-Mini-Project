@@ -1,7 +1,9 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+import streamlit.components.v1 as components
 import os
+import math
+from html import escape
 from datetime import datetime, timedelta
 import random
 
@@ -286,6 +288,357 @@ st.markdown("""
 
 CSV_FILE = "expenses.csv"
 
+CATEGORY_COLORS = {
+    "Food & Dining": "#5244E3",
+    "Rent & Housing": "#EF4444",
+    "Utilities": "#10B981",
+    "Entertainment": "#EC4899",
+    "Shopping": "#F97316",
+    "Transportation": "#3B82F6",
+    "Other": "#64748B",
+}
+FALLBACK_CHART_COLORS = ["#5244E3", "#6366F1", "#10B981", "#3B82F6", "#F97316", "#EC4899", "#64748B"]
+
+
+def mix_hex_color(color, mix="#ffffff", amount=0.28):
+    color = color.lstrip("#")
+    mix = mix.lstrip("#")
+    base_rgb = tuple(int(color[i:i + 2], 16) for i in (0, 2, 4))
+    mix_rgb = tuple(int(mix[i:i + 2], 16) for i in (0, 2, 4))
+    blended = tuple(round(base + (target - base) * amount) for base, target in zip(base_rgb, mix_rgb))
+    return "#" + "".join(f"{channel:02X}" for channel in blended)
+
+
+def get_category_color(category, index=0):
+    return CATEGORY_COLORS.get(category, FALLBACK_CHART_COLORS[index % len(FALLBACK_CHART_COLORS)])
+
+
+def polar_point(cx, cy, radius, angle):
+    return cx + radius * math.cos(angle), cy + radius * math.sin(angle)
+
+
+def donut_slice_path(start_angle, end_angle, outer_radius=148, inner_radius=82, cx=230, cy=185):
+    span = end_angle - start_angle
+    if span >= math.tau - 0.001:
+        return (
+            f"M {cx + outer_radius:.3f} {cy:.3f} "
+            f"A {outer_radius} {outer_radius} 0 1 1 {cx - outer_radius:.3f} {cy:.3f} "
+            f"A {outer_radius} {outer_radius} 0 1 1 {cx + outer_radius:.3f} {cy:.3f} "
+            f"M {cx + inner_radius:.3f} {cy:.3f} "
+            f"A {inner_radius} {inner_radius} 0 1 0 {cx - inner_radius:.3f} {cy:.3f} "
+            f"A {inner_radius} {inner_radius} 0 1 0 {cx + inner_radius:.3f} {cy:.3f} Z"
+        )
+
+    outer_start = polar_point(cx, cy, outer_radius, start_angle)
+    outer_end = polar_point(cx, cy, outer_radius, end_angle)
+    inner_end = polar_point(cx, cy, inner_radius, end_angle)
+    inner_start = polar_point(cx, cy, inner_radius, start_angle)
+    large_arc = 1 if span > math.pi else 0
+
+    return (
+        f"M {outer_start[0]:.3f} {outer_start[1]:.3f} "
+        f"A {outer_radius} {outer_radius} 0 {large_arc} 1 {outer_end[0]:.3f} {outer_end[1]:.3f} "
+        f"L {inner_end[0]:.3f} {inner_end[1]:.3f} "
+        f"A {inner_radius} {inner_radius} 0 {large_arc} 0 {inner_start[0]:.3f} {inner_start[1]:.3f} Z"
+    )
+
+
+def render_3d_donut_chart(category_totals):
+    chart_data = category_totals[category_totals["Amount"] > 0].copy()
+    chart_data = chart_data.sort_values("Amount", ascending=False).reset_index(drop=True)
+    total = chart_data["Amount"].sum()
+
+    if total <= 0:
+        return
+
+    depth_paths = []
+    slice_paths = []
+    legend_items = []
+    current_angle = -math.pi / 2
+
+    for index, row in chart_data.iterrows():
+        amount = float(row["Amount"])
+        category = str(row["Category"])
+        span = (amount / total) * math.tau
+        gap = min(0.018, span * 0.18) if len(chart_data) > 1 else 0
+        segment_start = current_angle + gap
+        segment_end = current_angle + span - gap
+        mid_angle = current_angle + span / 2
+        color = get_category_color(category, index)
+        depth_color = mix_hex_color(color, "#0f172a", 0.38)
+        category_label = escape(category, quote=True)
+        percent = amount / total
+        path = donut_slice_path(segment_start, segment_end)
+        hover_dx = math.cos(mid_angle) * 10
+        hover_dy = math.sin(mid_angle) * 10
+
+        depth_paths.append(
+            f'<path class="depth-path" d="{path}" fill="{depth_color}" fill-rule="evenodd"></path>'
+        )
+        slice_paths.append(f"""
+            <g class="slice" data-index="{index}" data-label="{category_label}" data-value="${amount:,.2f}" data-percent="{percent:.1%}" style="--dx: {hover_dx:.2f}px; --dy: {hover_dy:.2f}px;">
+                <path class="slice-main" d="{path}" fill="{color}" fill-rule="evenodd"></path>
+            </g>
+        """)
+        legend_items.append(f"""
+            <div class="legend-item" data-index="{index}">
+                <span class="legend-swatch" style="background: {color};"></span>
+                <span class="legend-copy">
+                    <span class="legend-name">{category_label}</span>
+                    <span class="legend-meta">{percent:.1%} · ${amount:,.2f}</span>
+                </span>
+            </div>
+        """)
+        current_angle += span
+
+    depth_markup = "\n".join(depth_paths)
+    slices_markup = "\n".join(slice_paths)
+    legend_markup = "\n".join(legend_items)
+
+    components.html(f"""
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+            * {{
+                box-sizing: border-box;
+            }}
+            html,
+            body {{
+                margin: 0;
+                background: transparent;
+                font-family: 'Plus Jakarta Sans', sans-serif;
+            }}
+            .donut-card {{
+                width: 100%;
+                min-height: 410px;
+                padding: 22px 24px;
+                background: #ffffff;
+                border: 1px solid #eef0f3;
+                border-radius: 20px;
+                box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.02), 0 10px 30px -5px rgba(15, 23, 42, 0.03);
+            }}
+            .donut-card:hover {{
+                box-shadow: 0 10px 30px -5px rgba(15, 23, 42, 0.06);
+            }}
+            .donut-layout {{
+                display: grid;
+                grid-template-columns: minmax(290px, 1fr) minmax(210px, 270px);
+                align-items: center;
+                gap: 18px;
+            }}
+            .chart-stage {{
+                position: relative;
+                min-height: 350px;
+            }}
+            .donut-svg {{
+                width: 100%;
+                height: 350px;
+                display: block;
+                overflow: visible;
+            }}
+            .depth-layer {{
+                transform: translateY(16px);
+                opacity: 0.34;
+                filter: blur(0.1px);
+                pointer-events: none;
+            }}
+            .slice {{
+                cursor: pointer;
+                transition: transform 160ms ease;
+                transform-box: fill-box;
+                transform-origin: center;
+            }}
+            .slice-main {{
+                stroke: #ffffff;
+                stroke-width: 4;
+                paint-order: stroke fill;
+                transition: filter 160ms ease, stroke-width 160ms ease;
+            }}
+            .slice:hover,
+            .slice.is-active {{
+                transform: translate(var(--dx), var(--dy));
+            }}
+            .slice:hover .slice-main,
+            .slice.is-active .slice-main {{
+                filter: brightness(1.08) saturate(1.08) drop-shadow(0 9px 14px rgba(15, 23, 42, 0.18));
+                stroke-width: 5.5;
+            }}
+            .base-shadow {{
+                fill: #0f172a;
+                opacity: 0.06;
+                pointer-events: none;
+            }}
+            .inner-hole {{
+                fill: #ffffff;
+                filter: drop-shadow(0 5px 12px rgba(15, 23, 42, 0.08));
+                pointer-events: none;
+            }}
+            .total-value {{
+                fill: #0f172a;
+                font-size: 27px;
+                font-weight: 800;
+                letter-spacing: 0;
+                text-anchor: middle;
+            }}
+            .total-label {{
+                fill: #64748b;
+                font-size: 12px;
+                font-weight: 700;
+                text-anchor: middle;
+            }}
+            .donut-tooltip {{
+                position: absolute;
+                z-index: 10;
+                left: 0;
+                top: 0;
+                min-width: 160px;
+                padding: 10px 12px;
+                border-radius: 12px;
+                background: #0f172a;
+                color: #ffffff;
+                box-shadow: 0 14px 30px rgba(15, 23, 42, 0.2);
+                pointer-events: none;
+                opacity: 0;
+                transform: translate(14px, 14px);
+                transition: opacity 120ms ease;
+            }}
+            .tooltip-title {{
+                display: block;
+                margin-bottom: 4px;
+                font-size: 12px;
+                font-weight: 800;
+            }}
+            .tooltip-meta {{
+                display: block;
+                color: #cbd5e1;
+                font-size: 11.5px;
+                font-weight: 600;
+            }}
+            .legend-list {{
+                display: flex;
+                flex-direction: column;
+                gap: 7px;
+            }}
+            .legend-item {{
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                min-height: 44px;
+                padding: 8px 10px;
+                border: 1px solid #eef0f3;
+                border-radius: 12px;
+                background: #ffffff;
+                transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+            }}
+            .legend-item:hover,
+            .legend-item.is-active {{
+                background: #f8fafc;
+                border-color: #e2e8f0;
+                transform: translateX(2px);
+            }}
+            .legend-swatch {{
+                width: 10px;
+                height: 28px;
+                flex: 0 0 auto;
+                border-radius: 999px;
+            }}
+            .legend-copy {{
+                min-width: 0;
+                display: flex;
+                flex-direction: column;
+                gap: 2px;
+            }}
+            .legend-name {{
+                color: #0f172a;
+                font-size: 12.5px;
+                font-weight: 800;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }}
+            .legend-meta {{
+                color: #64748b;
+                font-size: 11px;
+                font-weight: 700;
+            }}
+            @media (max-width: 680px) {{
+                .donut-card {{
+                    padding: 18px;
+                }}
+                .donut-layout {{
+                    grid-template-columns: 1fr;
+                }}
+                .chart-stage,
+                .donut-svg {{
+                    min-height: 300px;
+                    height: 300px;
+                }}
+            }}
+        </style>
+        <div class="donut-card">
+            <div class="donut-layout">
+                <div class="chart-stage">
+                    <svg class="donut-svg" viewBox="0 0 460 380" role="img" aria-label="3D hollow spending donut chart">
+                        <ellipse class="base-shadow" cx="230" cy="233" rx="151" ry="39"></ellipse>
+                        <g class="depth-layer">
+                            {depth_markup}
+                        </g>
+                        <g class="slice-layer">
+                            {slices_markup}
+                        </g>
+                        <circle class="inner-hole" cx="230" cy="185" r="72"></circle>
+                        <text class="total-value" x="230" y="180">${total:,.0f}</text>
+                        <text class="total-label" x="230" y="202">Total Outflow</text>
+                    </svg>
+                    <div class="donut-tooltip" aria-hidden="true">
+                        <span class="tooltip-title"></span>
+                        <span class="tooltip-meta"></span>
+                    </div>
+                </div>
+                <div class="legend-list">
+                    {legend_markup}
+                </div>
+            </div>
+        </div>
+        <script>
+            const root = document.currentScript.previousElementSibling;
+            const tooltip = root.querySelector('.donut-tooltip');
+            const tooltipTitle = root.querySelector('.tooltip-title');
+            const tooltipMeta = root.querySelector('.tooltip-meta');
+            const slices = Array.from(root.querySelectorAll('.slice'));
+            const legendItems = Array.from(root.querySelectorAll('.legend-item'));
+
+            function setActive(index) {{
+                slices.forEach((slice) => slice.classList.toggle('is-active', slice.dataset.index === index));
+                legendItems.forEach((item) => item.classList.toggle('is-active', item.dataset.index === index));
+            }}
+
+            function clearActive() {{
+                setActive(null);
+                tooltip.style.opacity = 0;
+            }}
+
+            function moveTooltip(event, slice) {{
+                const bounds = root.querySelector('.chart-stage').getBoundingClientRect();
+                tooltipTitle.textContent = slice.dataset.label;
+                tooltipMeta.textContent = `${{slice.dataset.value}} · ${{slice.dataset.percent}}`;
+                tooltip.style.left = `${{event.clientX - bounds.left}}px`;
+                tooltip.style.top = `${{event.clientY - bounds.top}}px`;
+                tooltip.style.opacity = 1;
+            }}
+
+            slices.forEach((slice) => {{
+                slice.addEventListener('mouseenter', () => setActive(slice.dataset.index));
+                slice.addEventListener('mousemove', (event) => moveTooltip(event, slice));
+                slice.addEventListener('mouseleave', clearActive);
+            }});
+
+            legendItems.forEach((item) => {{
+                item.addEventListener('mouseenter', () => setActive(item.dataset.index));
+                item.addEventListener('mouseleave', clearActive);
+            }});
+        </script>
+    """, height=455)
+
 
 # 3. Data Loading, Writing and Mock Generators
 def load_data():
@@ -489,37 +842,7 @@ else:
     # Styled Outer Card for the chart
     with st.container():
         category_totals = df_expenses.groupby("Category")["Amount"].sum().reset_index()
-
-        # Color palettes from the mockup (Indigo, Violet, Soft Lavenders, Grays, Pastel Blues)
-        mockup_colors = ["#5244E3", "#6366F1", "#A5B4FC", "#C7D2FE", "#E0E7FF", "#4338CA", "#1E1B4B"]
-
-        fig = px.pie(
-            category_totals,
-            values="Amount",
-            names="Category",
-            hole=0.65,  # Slightly wider opening for modern aesthetic
-            color_discrete_sequence=mockup_colors
-        )
-
-        # Premium updates to rendering
-        fig.update_traces(
-            textinfo="percent+label",
-            hovertemplate="<b>%{label}</b><br>Outflow: $% {value:,.2f}<br>Ratio: %{percent}<extra></extra>",
-            marker=dict(line=dict(color='#ffffff', width=3))  # Gap lines for premium look
-        )
-        fig.update_layout(
-            showlegend=False,
-            margin=dict(t=20, b=20, l=20, r=20),
-            height=380,
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(family="Plus Jakarta Sans, sans-serif", size=11, color="#334155")
-        )
-
-        # Standard container wrap for spacing
-        st.markdown('<div class="saas-card" style="padding: 10px 0px;">', unsafe_allow_html=True)
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-        st.markdown('</div>', unsafe_allow_html=True)
+        render_3d_donut_chart(category_totals)
 
     st.markdown("<hr/>", unsafe_allow_html=True)
 
