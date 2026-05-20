@@ -3,12 +3,16 @@ import pandas as pd
 import streamlit.components.v1 as components
 import os
 import math
+import re
+import hmac
+import secrets
+import hashlib
 from html import escape
 from datetime import datetime, timedelta
 import random
 
 # 1. Page Configuration (Full layout with custom icon and collapsed sidebar)
-st.set_page_config(page_title="Spenda - High-End Expense Analytics", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Budget Dashboard", layout="wide", initial_sidebar_state="collapsed")
 
 # 2. Complete High-Fidelity CSS overrides mimicking the uploaded design
 st.markdown("""
@@ -19,6 +23,10 @@ st.markdown("""
     html, body, [class*="css"], .stMarkdown {
         font-family: 'Plus Jakarta Sans', sans-serif !important;
         color: #0f172a;
+    }
+
+    .block-container {
+        padding-top: 112px !important;
     }
 
     /* Background of the overall workspace to mimic the mockup's soft gray */
@@ -155,8 +163,15 @@ st.markdown("""
         background: #ffffff !important;
         color: #000000 !important;
         -webkit-text-fill-color: #000000 !important;
+        caret-color: #5244e3 !important;
         font-size: 14px !important;
         font-family: 'Plus Jakarta Sans', sans-serif !important;
+    }
+
+    input,
+    textarea,
+    [contenteditable="true"] {
+        caret-color: #5244e3 !important;
     }
 
     /* Set input placeholder elements to visible slate gray */
@@ -211,6 +226,57 @@ st.markdown("""
     div[data-testid="stFormSubmitButton"] button:active,
     .stButton>button:active {
         transform: translateY(0px);
+    }
+
+    /* Clear auth mode switcher */
+    div[data-testid="stTabs"] [role="tablist"] {
+        gap: 10px;
+        margin-bottom: 16px;
+    }
+    div[data-testid="stTabs"] button[role="tab"] {
+        background-color: #ffffff !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 12px !important;
+        color: #334155 !important;
+        font-weight: 800 !important;
+        padding: 10px 18px !important;
+    }
+    div[data-testid="stTabs"] button[role="tab"] * {
+        color: inherit !important;
+        font-size: 14px !important;
+        font-weight: 800 !important;
+    }
+    div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+        background-color: #5244e3 !important;
+        border-color: #5244e3 !important;
+        color: #ffffff !important;
+        box-shadow: 0 8px 16px -4px rgba(82, 68, 227, 0.3) !important;
+    }
+    div[data-testid="stTabs"] [data-baseweb="tab-highlight"] {
+        display: none !important;
+    }
+
+    /* Fixed top-right dashboard actions */
+    .st-key-top_actions {
+        position: fixed;
+        top: 74px;
+        right: 28px;
+        z-index: 9999;
+        width: 310px;
+    }
+    .st-key-top_actions [data-testid="stHorizontalBlock"] {
+        display: flex;
+        gap: 12px;
+        flex-wrap: nowrap;
+    }
+    .st-key-top_actions [data-testid="column"] {
+        padding: 0 !important;
+        min-width: 0 !important;
+    }
+    .st-key-top_actions .stButton>button {
+        min-height: 44px;
+        padding: 0 18px;
+        white-space: nowrap;
     }
 
     /* Secondary/Demo Button Styling */
@@ -286,7 +352,14 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-CSV_FILE = "expenses.csv"
+LEGACY_CSV_FILE = "expenses.csv"
+DATA_DIR = "data"
+USER_DATA_DIR = os.path.join(DATA_DIR, "expenses")
+USERS_FILE = os.path.join(DATA_DIR, "users.csv")
+CSV_FILE = LEGACY_CSV_FILE
+USER_COLUMNS = ["username", "salt", "password_hash", "created_at"]
+EXPENSE_COLUMNS = ["Date", "Amount", "Category", "Description"]
+USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{3,32}$")
 
 CATEGORY_COLORS = {
     "Food & Dining": "#5244E3",
@@ -640,14 +713,183 @@ def render_3d_donut_chart(category_totals):
     """, height=455)
 
 
-# 3. Data Loading, Writing and Mock Generators
+# 3. Account Management, Data Loading, Writing and Mock Generators
+def ensure_storage():
+    os.makedirs(USER_DATA_DIR, exist_ok=True)
+
+
+def normalize_username(username):
+    return username.strip().lower()
+
+
+def is_valid_username(username):
+    return bool(USERNAME_PATTERN.fullmatch(username))
+
+
+def hash_password(password, salt):
+    password_bytes = password.encode("utf-8")
+    salt_bytes = salt.encode("utf-8")
+    digest = hashlib.pbkdf2_hmac("sha256", password_bytes, salt_bytes, 120_000)
+    return digest.hex()
+
+
+def load_users():
+    ensure_storage()
+    if not os.path.exists(USERS_FILE):
+        return pd.DataFrame(columns=USER_COLUMNS)
+
+    try:
+        users = pd.read_csv(USERS_FILE, dtype=str)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=USER_COLUMNS)
+
+    for column in USER_COLUMNS:
+        if column not in users.columns:
+            users[column] = ""
+
+    return users[USER_COLUMNS].fillna("")
+
+
+def save_users(users):
+    ensure_storage()
+    users[USER_COLUMNS].to_csv(USERS_FILE, index=False)
+
+
+def get_user_expense_file(username):
+    user_key = hashlib.sha256(username.encode("utf-8")).hexdigest()[:24]
+    return os.path.join(USER_DATA_DIR, f"{user_key}.csv")
+
+
+def ensure_user_expense_file(username):
+    expense_file = get_user_expense_file(username)
+    if not os.path.exists(expense_file):
+        pd.DataFrame(columns=EXPENSE_COLUMNS).to_csv(expense_file, index=False)
+
+
+def register_user(username, password):
+    username = normalize_username(username)
+    if not is_valid_username(username):
+        return False, "Username must be 3-32 characters and use only letters, numbers, or underscores."
+
+    if len(password) < 6:
+        return False, "Password must be at least 6 characters."
+
+    users = load_users()
+    if username in users["username"].str.lower().tolist():
+        return False, "That username already exists."
+
+    salt = secrets.token_hex(16)
+    new_user = pd.DataFrame([{
+        "username": username,
+        "salt": salt,
+        "password_hash": hash_password(password, salt),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }])
+    save_users(pd.concat([users, new_user], ignore_index=True))
+    ensure_user_expense_file(username)
+    return True, "Account created."
+
+
+def authenticate_user(username, password):
+    username = normalize_username(username)
+    users = load_users()
+    matches = users[users["username"].str.lower() == username]
+
+    if matches.empty:
+        return False
+
+    user = matches.iloc[0]
+    expected_hash = str(user["password_hash"])
+    password_hash = hash_password(password, str(user["salt"]))
+    return hmac.compare_digest(password_hash, expected_hash)
+
+
+def sign_in(username):
+    username = normalize_username(username)
+    ensure_user_expense_file(username)
+    st.session_state["authenticated"] = True
+    st.session_state["username"] = username
+
+
+def sign_out():
+    st.session_state["authenticated"] = False
+    st.session_state.pop("username", None)
+
+
+def render_top_actions():
+    with st.container(key="top_actions"):
+        demo_action, logout_action = st.columns([1.45, 1])
+        with demo_action:
+            if st.button("🚀 Load Demo Data", key="demobutton"):
+                generate_mock_data()
+                st.rerun()
+        with logout_action:
+            if st.button("Log Out", key="logoutbutton"):
+                sign_out()
+                st.rerun()
+
+
+def render_auth_screen():
+    _, auth_col, _ = st.columns([1.35, 0.9, 1.35])
+    with auth_col:
+        st.markdown("""
+            <div class="saas-card" style="margin-top: 80px; margin-bottom: 12px; padding: 20px;">
+                <p style="color: #64748b; font-size: 14px; margin: 0; line-height: 1.5;">Sign in or create an account to keep each person's dashboard and transactions separate.</p>
+            </div>
+        """, unsafe_allow_html=True)
+
+        login_tab, register_tab = st.tabs(["Log In", "Create Account"])
+
+        with login_tab:
+            with st.form("login_form"):
+                login_username = st.text_input("Username", key="login_username")
+                login_password = st.text_input("Password", type="password", key="login_password")
+                login_submit = st.form_submit_button("Login")
+
+                if login_submit:
+                    if authenticate_user(login_username, login_password):
+                        sign_in(login_username)
+                        st.rerun()
+                    else:
+                        st.error("Invalid username or password.")
+
+        with register_tab:
+            with st.form("register_form"):
+                register_username = st.text_input("Username", key="register_username")
+                register_password = st.text_input("Password", type="password", key="register_password")
+                confirm_password = st.text_input("Confirm Password", type="password", key="confirm_password")
+                register_submit = st.form_submit_button("Create New Account")
+
+                if register_submit:
+                    if register_password != confirm_password:
+                        st.error("Passwords do not match.")
+                    else:
+                        created, message = register_user(register_username, register_password)
+                        if created:
+                            sign_in(register_username)
+                            st.rerun()
+                        else:
+                            st.error(message)
+
+
 def load_data():
     if os.path.exists(CSV_FILE):
-        df = pd.read_csv(CSV_FILE)
-        df['Date'] = pd.to_datetime(df['Date'])
+        try:
+            df = pd.read_csv(CSV_FILE)
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame(columns=EXPENSE_COLUMNS)
+
+        for column in EXPENSE_COLUMNS:
+            if column not in df.columns:
+                df[column] = None
+
+        df = df[EXPENSE_COLUMNS]
+        df['Date'] = pd.to_datetime(df['Date'], errors="coerce")
+        df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce").fillna(0)
+        df = df.dropna(subset=["Date"])
         return df
     else:
-        return pd.DataFrame(columns=["Date", "Amount", "Category", "Description"])
+        return pd.DataFrame(columns=EXPENSE_COLUMNS)
 
 
 def save_data(df):
@@ -696,25 +938,39 @@ def generate_mock_data():
     save_data(df)
 
 
+ensure_storage()
+
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    render_auth_screen()
+    st.stop()
+
+current_user = st.session_state.get("username")
+if not current_user:
+    sign_out()
+    st.rerun()
+
+CSV_FILE = get_user_expense_file(current_user)
+ensure_user_expense_file(current_user)
+
 # Initialize Data
 df_expenses = load_data()
+current_user_label = escape(current_user, quote=True)
+render_top_actions()
 
 # 4. Header Area matching the crisp mockup alignment
-col_header, col_action = st.columns([3, 1])
+col_header, _ = st.columns([2.15, 1.15])
 with col_header:
     st.markdown(
         "<h1 style='color: #0f172a; margin-bottom: 0px; font-weight: 800; letter-spacing: -0.03em; font-size: 34px;'>Dashboard</h1>",
         unsafe_allow_html=True)
-    st.markdown(
-        "<p style='color: #64748b; font-size: 14.5px; margin-top: 4px; margin-bottom: 30px; font-weight: 500;'>All general information and parsed expense outlays appear in this field.</p>",
-        unsafe_allow_html=True)
-
-with col_action:
-    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-    # Styled like secondary buttons in design
-    if st.button("🚀 Load Demo Data", key="demobutton"):
-        generate_mock_data()
-        st.rerun()
+    st.markdown(f"""
+        <p style='color: #64748b; font-size: 14.5px; margin-top: 4px; margin-bottom: 30px; font-weight: 500;'>
+            Signed in as <strong>@{current_user_label}</strong>. This dashboard only shows this account's expense data.
+        </p>
+    """, unsafe_allow_html=True)
 
 # 5. Empty State Handling with a beautiful card
 if df_expenses.empty:
@@ -924,11 +1180,13 @@ else:
 
         for idx, row in df_display.iterrows():
             date_formatted = row['Date'].strftime('%b %d, %Y')
-            pill_color = get_pill_class(row['Category'])
+            category_text = str(row['Category'])
+            description_text = str(row['Description'])
+            pill_color = get_pill_class(category_text)
 
             table_html += f"""<tr>
-<td style="font-weight: 600; color: #0f172a;">{row['Description']}</td>
-<td><span class="saas-pill {pill_color}">{row['Category']}</span></td>
+<td style="font-weight: 600; color: #0f172a;">{escape(description_text)}</td>
+<td><span class="saas-pill {pill_color}">{escape(category_text)}</span></td>
 <td style="color: #64748b; font-weight: 500;">{date_formatted}</td>
 <td style="text-align: right; font-weight: 700; color: #0f172a;">${row['Amount']:,.2f}</td>
 </tr>"""
