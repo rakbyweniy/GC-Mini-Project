@@ -348,6 +348,102 @@ st.markdown("""
         height: 1px;
         background: #eef0f3;
         margin: 40px 0;
+    }    
+    
+    .weekly-bar-card {
+        background: #ffffff;
+        border: 1px solid #eef0f3;
+        border-radius: 20px;
+        padding: 24px;
+        box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.02), 0 10px 30px -5px rgba(15, 23, 42, 0.03);
+        margin-top: 18px;
+    }
+
+    .weekly-bars {
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        gap: 14px;
+        align-items: end;
+        min-height: 280px;
+        padding-top: 20px;
+    }
+
+    .weekly-bar-wrap {
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        min-width: 0;
+    }
+
+    .weekly-bar-value {
+        color: #0f172a;
+        font-size: 12px;
+        font-weight: 800;
+        text-align: center;
+        margin-bottom: 8px;
+    }
+
+    .weekly-bar {
+        width: 100%;
+        min-height: 8px;
+        border-radius: 14px 14px 8px 8px;
+        background: linear-gradient(180deg, #ede9fe 0%, #5244e3 100%);
+        box-shadow: 0 10px 22px -10px rgba(82, 68, 227, 0.55);
+    }
+
+    .weekly-bar-date {
+        color: #64748b;
+        font-size: 11px;
+        font-weight: 800;
+        text-align: center;
+        margin-top: 10px;
+        white-space: nowrap;
+    }
+        .st-key-category_button_food_dining button {
+        background-color: #5244e3 !important;
+        color: #ffffff !important;
+        border-color: #5244e3 !important;
+    }
+
+    .st-key-category_button_rent_housing button {
+        background-color: #ef4444 !important;
+        color: #ffffff !important;
+        border-color: #ef4444 !important;
+    }
+
+    .st-key-category_button_utilities button {
+        background-color: #10b981 !important;
+        color: #ffffff !important;
+        border-color: #10b981 !important;
+    }
+
+    .st-key-category_button_entertainment button {
+        background-color: #ec4899 !important;
+        color: #ffffff !important;
+        border-color: #ec4899 !important;
+    }
+
+    .st-key-category_button_shopping button {
+        background-color: #f97316 !important;
+        color: #ffffff !important;
+        border-color: #f97316 !important;
+    }
+
+    .st-key-category_button_transportation button {
+        background-color: #3b82f6 !important;
+        color: #ffffff !important;
+        border-color: #3b82f6 !important;
+    }
+
+    .st-key-category_button_other button {
+        background-color: #64748b !important;
+        color: #ffffff !important;
+        border-color: #64748b !important;
+    }
+
+    [class*="st-key-category_button_"] button:hover {
+        filter: brightness(0.92);
+        color: #ffffff !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -712,7 +808,265 @@ def render_3d_donut_chart(category_totals):
         </script>
     """, height=455)
 
+def clear_category_view():
+    st.session_state["selected_category"] = None
 
+
+def build_weekly_category_spending(df, category):
+    category_df = df[df["Category"] == category].copy()
+
+    if category_df.empty:
+        end_date = pd.Timestamp(datetime.now().date())
+    else:
+        end_date = category_df["Date"].max().normalize()
+
+    start_date = end_date - pd.Timedelta(days=6)
+    week_dates = pd.date_range(start=start_date, end=end_date, freq="D")
+
+    weekly = (
+        category_df[
+            (category_df["Date"] >= start_date)
+            & (category_df["Date"] <= end_date + pd.Timedelta(days=1))
+        ]
+        .assign(Day=lambda data: data["Date"].dt.normalize())
+        .groupby("Day")["Amount"]
+        .sum()
+        .reindex(week_dates, fill_value=0)
+        .reset_index()
+    )
+
+    weekly.columns = ["Date", "Amount"]
+    return weekly
+
+def get_category_graph_color(category):
+    if "Rent" in category:
+        return "#ef4444"
+    elif "Food" in category:
+        return "#5244e3"
+    elif "Utilities" in category:
+        return "#10b981"
+    elif "Transportation" in category:
+        return "#3b82f6"
+    elif "Shopping" in category:
+        return "#f97316"
+    elif "Entertainment" in category:
+        return "#ec4899"
+    else:
+        return "#64748b"
+def render_weekly_category_bar_chart(weekly_df, category):
+    max_amount = weekly_df["Amount"].max()
+    max_amount = max_amount if max_amount > 0 else 1
+    total = weekly_df["Amount"].sum()
+    bar_color = get_category_graph_color(category)
+    bar_light_color = mix_hex_color(bar_color, "#ffffff", 0.78)
+
+    bars_html = ""
+
+    for _, row in weekly_df.iterrows():
+        amount = float(row["Amount"])
+        height = max(8, (amount / max_amount) * 220) if amount > 0 else 8
+        date_label = row["Date"].strftime("%b %d")
+
+        bars_html += f"""
+        <div class="weekly-bar-wrap">
+            <div class="weekly-bar-value">${amount:,.0f}</div>
+            <div class="weekly-bar" style="height: {height:.0f}px; background: linear-gradient(180deg, {bar_light_color} 0%, {bar_color} 100%); box-shadow: 0 10px 22px -10px {bar_color};"></div>
+            <div class="weekly-bar-date">{date_label}</div>
+        </div>
+        """
+
+    components.html(f"""
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+
+        body {{
+            margin: 0;
+            background: transparent;
+            font-family: 'Plus Jakarta Sans', sans-serif;
+        }}
+
+        .weekly-bar-card {{
+            background: #ffffff;
+            border: 1px solid #eef0f3;
+            border-radius: 20px;
+            padding: 24px;
+            box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.02), 0 10px 30px -5px rgba(15, 23, 42, 0.03);
+        }}
+
+        .kpi-title {{
+            color: #64748b;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }}
+
+        .kpi-value {{
+            color: #0f172a;
+            font-weight: 800;
+            font-size: 32px;
+            line-height: 1.1;
+            margin-bottom: 12px;
+        }}
+
+        .saas-pill {{
+            display: inline-flex;
+            align-items: center;
+            padding: 5px 12px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 700;
+            margin-right: 6px;
+            margin-bottom: 4px;
+            border: 1px solid transparent;
+        }}
+
+        .pill-purple {{
+            background-color: #f5f3ff;
+            color: #5244e3;
+            border-color: #ede9fe;
+        }}
+
+        .pill-gray {{
+            background-color: #f8fafc;
+            color: #64748b;
+            border-color: #f1f5f9;
+        }}
+
+        .weekly-bars {{
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 14px;
+            align-items: end;
+            min-height: 280px;
+            padding-top: 20px;
+        }}
+
+        .weekly-bar-wrap {{
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            min-width: 0;
+        }}
+
+        .weekly-bar-value {{
+            color: #0f172a;
+            font-size: 12px;
+            font-weight: 800;
+            text-align: center;
+            margin-bottom: 8px;
+        }}
+
+        .weekly-bar {{
+            width: 100%;
+            min-height: 8px;
+            border-radius: 14px 14px 8px 8px;
+            background: linear-gradient(180deg, #ede9fe 0%, #5244e3 100%);
+            box-shadow: 0 10px 22px -10px rgba(82, 68, 227, 0.55);
+        }}
+
+        .weekly-bar-date {{
+            color: #64748b;
+            font-size: 11px;
+            font-weight: 800;
+            text-align: center;
+            margin-top: 10px;
+            white-space: nowrap;
+        }}
+    </style>
+
+    <div class="weekly-bar-card">
+        <div>
+            <div class="kpi-title">Weekly Category Spend</div>
+            <div class="kpi-value">${total:,.2f}</div>
+            <span class="saas-pill" style="background-color: {bar_light_color}; color: {bar_color}; border-color: {bar_light_color};">
+                {escape(category)}
+            </span>
+            <span class="saas-pill pill-gray">Most recent 7 days</span>
+        </div>
+
+        <div class="weekly-bars">
+            {bars_html}
+        </div>
+    </div>
+    """, height=430)
+
+def render_category_detail_view(df_expenses, category):
+    category_color = get_category_color(category)
+    weekly_df = build_weekly_category_spending(df_expenses, category)
+
+    st.markdown(f"""
+        <h1 style='color: #0f172a; margin-bottom: 0px; font-weight: 800; letter-spacing: -0.03em; font-size: 34px;'>
+            {escape(category)}
+        </h1>
+        <p style='color: #64748b; font-size: 14.5px; margin-top: 4px; margin-bottom: 22px; font-weight: 500;'>
+            See spending for last 7 days.
+        </p>
+    """, unsafe_allow_html=True)
+
+    if st.button("← Back to Dashboard", key="back_to_dashboard"):
+        clear_category_view()
+        st.rerun()
+
+    render_weekly_category_bar_chart(weekly_df, category)
+
+    category_transactions = (
+        df_expenses[df_expenses["Category"] == category]
+        .sort_values("Date", ascending=False)
+        .head(8)
+    )
+
+    st.markdown(
+        "<h3 style='color: #0f172a; font-weight: 800; letter-spacing: -0.02em; margin-top: 34px;'>Recent Category Transactions</h3>",
+        unsafe_allow_html=True,
+    )
+
+    if category_transactions.empty:
+        st.info("No transactions found for this category.")
+    else:
+        for _, row in category_transactions.iterrows():
+            st.markdown(f"""
+                <div class="saas-card" style="padding: 16px 18px; margin-bottom: 10px; border-left: 5px solid {category_color};">
+                    <div style="display: flex; justify-content: space-between; gap: 16px; align-items: center;">
+                        <div>
+                            <div style="font-weight: 800; color: #0f172a; font-size: 14px;">
+                                {escape(str(row["Description"]))}
+                            </div>
+                            <div style="color: #64748b; font-size: 12px; font-weight: 700; margin-top: 3px;">
+                                {row["Date"].strftime("%b %d, %Y")}
+                            </div>
+                        </div>
+                        <div style="font-weight: 800; color: #0f172a; font-size: 16px;">
+                            ${row["Amount"]:,.2f}
+                        </div>
+                    </div>
+                </div>
+            """, unsafe_allow_html=True)
+
+def get_category_button_key(category):
+    key = category.lower()
+    key = key.replace("&", "")
+    key = re.sub(r"[^a-z0-9]+", "_", key)
+    key = key.strip("_")
+    return key
+
+
+def render_category_buttons(category_totals):
+    st.markdown(
+        "<p style='color: #64748b; font-size: 13.5px; margin-top: 18px; margin-bottom: 12px; font-weight: 700;'>Click a category to inspect weekly spending.</p>",
+        unsafe_allow_html=True,
+    )
+
+    categories = category_totals.sort_values("Amount", ascending=False)["Category"].tolist()
+    cols = st.columns(min(4, max(1, len(categories))))
+
+    for index, category in enumerate(categories):
+        safe_key = get_category_button_key(category)
+
+        with cols[index % len(cols)]:
+            with st.container(key=f"category_button_{safe_key}"):
+                if st.button(category, key=f"category_detail_{safe_key}", use_container_width=True):
+                    st.session_state["selected_category"] = category
+                    st.rerun()
 # 3. Account Management, Data Loading, Writing and Mock Generators
 def ensure_storage():
     os.makedirs(USER_DATA_DIR, exist_ok=True)
@@ -814,6 +1168,7 @@ def sign_in(username):
 def sign_out():
     st.session_state["authenticated"] = False
     st.session_state.pop("username", None)
+    st.session_state.pop("selected_category", None)
 
 
 def render_top_actions():
@@ -943,6 +1298,9 @@ ensure_storage()
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
+if "selected_category" not in st.session_state:
+    st.session_state["selected_category"] = None
+
 if not st.session_state["authenticated"]:
     render_auth_screen()
     st.stop()
@@ -959,7 +1317,11 @@ ensure_user_expense_file(current_user)
 df_expenses = load_data()
 current_user_label = escape(current_user, quote=True)
 render_top_actions()
+selected_category = st.session_state.get("selected_category")
 
+if selected_category:
+    render_category_detail_view(df_expenses, selected_category)
+    st.stop()
 # 4. Header Area matching the crisp mockup alignment
 col_header, _ = st.columns([2.15, 1.15])
 with col_header:
@@ -1099,6 +1461,7 @@ else:
     with st.container():
         category_totals = df_expenses.groupby("Category")["Amount"].sum().reset_index()
         render_3d_donut_chart(category_totals)
+        render_category_buttons(category_totals)
 
     st.markdown("<hr/>", unsafe_allow_html=True)
 
